@@ -1,0 +1,768 @@
+<!DOCTYPE html>
+<html lang="ar" dir="ltr">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+    <title>Stalin Run: The Rise</title>
+    <script src="https://cdn.jsdelivr.net/npm/phaser@3.60.0/dist/phaser.min.js"></script>
+    <style>
+        body {
+            margin: 0;
+            padding: 0;
+            background-color: #111;
+            overflow: hidden; /* لمنع ظهور أشرطة التمرير */
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+        }
+        canvas {
+            display: block;
+            margin: 0 auto;
+        }
+    </style>
+</head>
+<body>
+
+<script>
+    // المتغيرات العامة للعبة
+    let isMobile = false;
+    
+    // ==========================================
+    // المشهد الأول: تحميل الملفات (BootScene)
+    // ==========================================
+    class BootScene extends Phaser.Scene {
+        constructor() {
+            super({ key: 'BootScene' });
+        }
+
+        preload() {
+            // إضافة نص التحميل
+            let loadingText = this.add.text(this.cameras.main.centerX, this.cameras.main.centerY, 'جاري التحميل...', {
+                font: '32px Arial',
+                fill: '#ffffff'
+            }).setOrigin(0.5, 0.5);
+
+            // تحميل الصور التي قمت بإرفاقها
+            // ملاحظة: بما أن الصور مجمعة، سنقوم لاحقاً بتقطيعها برمجياً (Crop) لعرض الجزء المناسب
+            this.load.image('characters_sheet', 'image_710baa.jpg');
+            this.load.image('backgrounds_sheet', 'image_710bc8.jpg');
+
+            // تحميل أصوات افتراضية (مؤقتة حتى يتم ربط ملفات صوتية حقيقية)
+            // نستخدم أصوات مبنية برمجياً لتجنب أخطاء التحميل
+            this.load.audio('jump', ['data:audio/wav;base64,UklGRigAAABXQVZFZm10IBIAAAABAAEARKwAAIhYAQACABAAAABkYXRhAgAAAAEA']); // صوت فارغ مؤقت
+
+            this.load.on('complete', () => {
+                this.scene.start('MenuScene');
+            });
+        }
+    }
+
+    // ==========================================
+    // المشهد الثاني: القائمة واختيار الجهاز (MenuScene)
+    // ==========================================
+    class MenuScene extends Phaser.Scene {
+        constructor() {
+            super({ key: 'MenuScene' });
+        }
+
+        create() {
+            let width = this.cameras.main.width;
+            let height = this.cameras.main.height;
+
+            // خلفية القائمة
+            this.add.rectangle(0, 0, width, height, 0x222222).setOrigin(0, 0);
+
+            // عنوان اللعبة
+            this.add.text(width / 2, height * 0.3, 'Stalin Run: The Rise', {
+                fontSize: '48px',
+                fill: '#ff4444',
+                fontStyle: 'bold'
+            }).setOrigin(0.5);
+
+            // زر اللعب على الحاسوب
+            let pcBtn = this.add.rectangle(width / 2, height * 0.55, 300, 60, 0x4444ff)
+                .setInteractive({ useHandCursor: true })
+                .on('pointerdown', () => this.startGame(false));
+            
+            this.add.text(width / 2, height * 0.55, 'Play on PC (Keyboard)', { fontSize: '24px', fill: '#fff' }).setOrigin(0.5);
+
+            // زر اللعب على الهاتف
+            let mobileBtn = this.add.rectangle(width / 2, height * 0.7, 300, 60, 0x44aa44)
+                .setInteractive({ useHandCursor: true })
+                .on('pointerdown', () => this.startGame(true));
+            
+            this.add.text(width / 2, height * 0.7, 'Play on Mobile (Touch)', { fontSize: '24px', fill: '#fff' }).setOrigin(0.5);
+        }
+
+        startGame(mobile) {
+            isMobile = mobile;
+            // الانتقال إلى مشهد المستوى الأول (سنقوم ببرمجته في الجزء التالي)
+            this.scene.start('Level1');
+        }
+    }
+
+    // ==========================================
+    // إعدادات محرك Phaser
+    // ==========================================
+// ==========================================
+    // فئة اللاعب (Player) - تتضمن الفيزياء الحديثة
+    // ==========================================
+    class Player extends Phaser.Physics.Arcade.Sprite {
+        constructor(scene, x, y) {
+            // نستخدم صورة شخصية افتراضية مؤقتاً (سيتم القص من الشيت المجمع لاحقاً)
+            super(scene, x, y, 'characters_sheet'); 
+            scene.add.existing(this);
+            scene.physics.add.existing(this);
+
+            this.setCollideWorldBounds(true);
+            this.setOrigin(0.5, 1);
+            
+            // خصائص الحركة والفيزياء الحديثة
+            this.speed = 250;
+            this.jumpForce = -550;
+            
+            // ميزات اللعب الحديث (Coyote Time & Jump Buffer) لجعل القفز سلساً وعادلاً
+            this.coyoteTime = 150; // يسمح بالقفز لكسر من الثانية بعد مغادرة المنصة
+            this.jumpBuffer = 150; // يحفظ ضغطة القفز لكسر من الثانية قبل ملامسة الأرض
+            this.lastGroundedTime = 0;
+            this.lastJumpPressedTime = 0;
+
+            // إحصائيات اللاعب
+            this.health = 3;
+            this.hasShield = false;
+            this.isInvulnerable = false; // مناعة مؤقتة بعد التضرر
+            this.coins = 0;
+
+            this.scene = scene;
+        }
+
+        update(time, cursors, mobileInput) {
+            // التحقق مما إذا كان اللاعب يلامس الأرض
+            const onGround = this.body.touching.down || this.body.blocked.down;
+            
+            if (onGround) {
+                this.lastGroundedTime = time;
+            }
+
+            // الحركة الأفقية (تعمل مع لوحة المفاتيح أو شاشة اللمس)
+            let isMovingLeft = cursors.left.isDown || (mobileInput && mobileInput.left);
+            let isMovingRight = cursors.right.isDown || (mobileInput && mobileInput.right);
+
+            if (isMovingLeft) {
+                this.setVelocityX(-this.speed);
+                // قلب اتجاه الشخصية
+                this.setFlipX(true); 
+            } else if (isMovingRight) {
+                this.setVelocityX(this.speed);
+                this.setFlipX(false);
+            } else {
+                this.setVelocityX(0);
+            }
+
+            // القفز
+            let jumpPressed = Phaser.Input.Keyboard.JustDown(cursors.up) || (mobileInput && mobileInput.jumpPressed);
+            
+            if (jumpPressed) {
+                this.lastJumpPressedTime = time;
+                if(mobileInput) mobileInput.jumpPressed = false; // تصفير زر الهاتف
+            }
+
+            // التحقق من إمكانية القفز بناءً على الفيزياء الحديثة
+            let canJump = (time - this.lastGroundedTime <= this.coyoteTime);
+            let wantsToJump = (time - this.lastJumpPressedTime <= this.jumpBuffer);
+
+            if (wantsToJump && canJump) {
+                this.setVelocityY(this.jumpForce);
+                this.lastJumpPressedTime = 0; // استهلاك القفزة
+                this.lastGroundedTime = 0;
+                
+                // تأثير الغبار والصوت (Game Juice)
+                this.createDust();
+                this.scene.sound.play('jump', { volume: 0.5 });
+            }
+        }
+
+        takeDamage() {
+            if (this.isInvulnerable) return false;
+
+            // إذا كان يمتلك درعاً، يخسره بدلاً من الصحة
+            if (this.hasShield) {
+                this.hasShield = false;
+                this.triggerInvulnerability();
+                this.scene.cameras.main.shake(100, 0.01); // اهتزاز خفيف للشاشة
+                return false; 
+            }
+
+            // خسارة الصحة
+            this.health--;
+            this.triggerInvulnerability();
+            this.scene.cameras.main.shake(250, 0.02); // اهتزاز أقوى
+            
+            if (this.health <= 0) {
+                this.die();
+            }
+            return true;
+        }
+
+        triggerInvulnerability() {
+            this.isInvulnerable = true;
+            this.setAlpha(0.5); // جعل الشخصية شفافة قليلاً
+            this.scene.time.delayedCall(1500, () => {
+                this.isInvulnerable = false;
+                this.setAlpha(1);
+            });
+        }
+
+        die() {
+            // سنقوم لاحقاً بربط هذا بدالة إعادة الإحياء في المستوى
+            if(this.scene.respawnPlayer) {
+                this.scene.respawnPlayer();
+            }
+        }
+
+        createDust() {
+            // إنشاء تأثير جزيئات الغبار عند القفز
+            let dust = this.scene.add.rectangle(this.x, this.y, 8, 8, 0xffffff, 0.7);
+            this.scene.tweens.add({
+                targets: dust,
+                y: this.y + 15,
+                x: this.x + (Math.random() * 10 - 5),
+                alpha: 0,
+                scale: 1.5,
+                duration: 400,
+                onComplete: () => dust.destroy()
+            });
+        }
+    }
+
+    // ==========================================
+    // واجهة المستخدم وعناصر التحكم (UI & Mobile Controls)
+    // ==========================================
+    class GameUI {
+        constructor(scene) {
+            this.scene = scene;
+            this.mobileInput = { left: false, right: false, jumpPressed: false, actionPressed: false };
+            
+            // نصوص الواجهة (القلوب، العملات، الدرع) ونجعلها ثابتة لا تتحرك مع الكاميرا
+            this.healthText = scene.add.text(20, 20, '❤️❤️❤️', { fontSize: '24px' }).setScrollFactor(0);
+            this.coinsText = scene.add.text(20, 60, '☭ 0', { fontSize: '28px', fill: '#ffd700', fontStyle: 'bold' }).setScrollFactor(0);
+            this.shieldIcon = scene.add.text(120, 60, '🛡️', { fontSize: '24px', alpha: 0 }).setScrollFactor(0);
+            
+            // إنشاء أزرار اللمس إذا اختار اللاعب الهاتف
+            if (isMobile) {
+                this.createMobileControls();
+            }
+        }
+
+        updateHUD(health, coins, hasShield) {
+            let hearts = '';
+            for(let i = 0; i < health; i++) hearts += '❤️';
+            this.healthText.setText(hearts);
+            this.coinsText.setText('☭ ' + coins);
+            this.shieldIcon.setAlpha(hasShield ? 1 : 0);
+        }
+
+        createMobileControls() {
+            let width = this.scene.cameras.main.width;
+            let height = this.scene.cameras.main.height;
+            
+            // أزرار شفافة (تراكب Overlay) لا تصغر حجم اللعبة
+            const btnColor = 0xffffff;
+            const btnAlpha = 0.15;
+            const textStyle = { fill: '#fff', alpha: 0.5, font: '40px Arial' };
+
+            // زر اليسار
+            let leftBtn = this.scene.add.rectangle(80, height - 80, 100, 100, btnColor, btnAlpha).setScrollFactor(0).setInteractive();
+            this.scene.add.text(80, height - 80, '◀', textStyle).setOrigin(0.5).setScrollFactor(0);
+            
+            // زر اليمين
+            let rightBtn = this.scene.add.rectangle(200, height - 80, 100, 100, btnColor, btnAlpha).setScrollFactor(0).setInteractive();
+            this.scene.add.text(200, height - 80, '▶', textStyle).setOrigin(0.5).setScrollFactor(0);
+
+            // زر القفز (على اليمين)
+            let jumpBtn = this.scene.add.rectangle(width - 80, height - 80, 100, 100, btnColor, btnAlpha).setScrollFactor(0).setInteractive();
+            this.scene.add.text(width - 80, height - 80, '▲', textStyle).setOrigin(0.5).setScrollFactor(0);
+
+            // إضافة تفاعل اللمس للأزرار
+            leftBtn.on('pointerdown', () => this.mobileInput.left = true)
+                   .on('pointerup', () => this.mobileInput.left = false)
+                   .on('pointerout', () => this.mobileInput.left = false);
+                   
+            rightBtn.on('pointerdown', () => this.mobileInput.right = true)
+                    .on('pointerup', () => this.mobileInput.right = false)
+                    .on('pointerout', () => this.mobileInput.right = false);
+
+            jumpBtn.on('pointerdown', () => this.mobileInput.jumpPressed = true)
+                   .on('pointerup', () => this.mobileInput.jumpPressed = false)
+                   .on('pointerout', () => this.mobileInput.jumpPressed = false);
+        }
+    }// ==========================================
+    // فئة الأعداء (Enemy) - ذكاء اصطناعي متطور
+    // ==========================================
+    class Enemy extends Phaser.Physics.Arcade.Sprite {
+        constructor(scene, x, y, level) {
+            super(scene, x, y, 'characters_sheet');
+            scene.add.existing(this);
+            scene.physics.add.existing(this);
+            
+            this.setCollideWorldBounds(true);
+            this.level = level;
+            this.speed = 100 + (level * 10); // سرعة تزداد مع تقدم المستويات
+            this.setVelocityX(-this.speed);
+            
+            // خصائص الرماية (للمستويات المتقدمة)
+            this.canShoot = level >= 7;
+            this.lastShotTime = 0;
+        }
+
+        update(time) {
+            // انعكاس الحركة عند الاصطدام بحائط أو حافة
+            if (this.body.blocked.left) {
+                this.setVelocityX(this.speed);
+                this.setFlipX(true);
+            } else if (this.body.blocked.right) {
+                this.setVelocityX(-this.speed);
+                this.setFlipX(false);
+            }
+
+            // ذكاء الرماية في مستويات الحرب
+            if (this.canShoot && time > this.lastShotTime + 2000) {
+                this.shoot();
+                this.lastShotTime = time;
+            }
+        }
+
+        shoot() {
+            let bullet = this.scene.physics.add.sprite(this.x, this.y, 'characters_sheet');
+            bullet.body.allowGravity = false;
+            let direction = this.flipX ? 1 : -1;
+            bullet.setVelocityX(300 * direction);
+            this.scene.enemyBullets.add(bullet);
+            // تدمير الرصاصة بعد فترة
+            this.scene.time.delayedCall(2000, () => bullet.destroy());
+        }
+    }
+
+    // ==========================================
+    // نظام صناديق الأسئلة (Question Box System)
+    // ==========================================
+    class QuestionBox extends Phaser.Physics.Arcade.Sprite {
+        constructor(scene, x, y) {
+            super(scene, x, y, 'characters_sheet'); // سنستخدم جزءاً معيناً من الصورة لاحقاً
+            scene.add.existing(this);
+            scene.physics.add.existing(this, true); // جسم ساكن (Static)
+            this.setTint(0xffff00); // تلوين الصندوق بالذهبي
+            this.isOpened = false;
+        }
+
+        open() {
+            if (this.isOpened) return;
+            this.isOpened = true;
+            this.setAlpha(0.5);
+            
+            // تعطيل فيزياء اللعبة مؤقتاً لعرض السؤال
+            this.scene.physics.world.pause();
+            this.showQuestionUI();
+        }
+
+        showQuestionUI() {
+            const scene = this.scene;
+            const width = scene.cameras.main.width;
+            const height = scene.cameras.main.height;
+
+            // خلفية السؤال
+            let overlay = scene.add.rectangle(width/2, height/2, 500, 350, 0x000000, 0.9).setScrollFactor(0).setDepth(100);
+            let qText = scene.add.text(width/2, height/2 - 100, 'سؤال تاريخي: ما هو عام الثورة؟', { 
+                fontSize: '24px', fill: '#fff', align: 'center', wordWrap: { width: 400 } 
+            }).setOrigin(0.5).setScrollFactor(0).setDepth(101);
+
+            // الخيارات
+            let options = ['1917', '1945', '1991'];
+            options.forEach((opt, index) => {
+                let btn = scene.add.text(width/2, height/2 + (index * 50), opt, { 
+                    fontSize: '22px', fill: '#ffff00', backgroundColor: '#333', padding: 10 
+                }).setOrigin(0.5).setScrollFactor(0).setDepth(101).setInteractive();
+
+                btn.on('pointerdown', () => {
+                    if (opt === '1917') {
+                        scene.player.coins += 10;
+                        scene.player.hasShield = true;
+                        // تأثير صوت النجاح
+                    }
+                    // إغلاق الواجهة واستئناف اللعب
+                    overlay.destroy();
+                    qText.destroy();
+                    scene.children.list.filter(c => c.depth === 101 || c.depth === 100).forEach(c => c.destroy());
+                    scene.physics.world.resume();
+                });
+            });
+        }
+    }
+
+    // ==========================================
+    // نظام العملات (Collectibles)
+    // ==========================================
+    class Coin extends Phaser.Physics.Arcade.Sprite {
+        constructor(scene, x, y) {
+            super(scene, x, y, 'characters_sheet');
+            scene.add.existing(this);
+            scene.physics.add.existing(this, true);
+            this.setTint(0xffd700);
+            
+            // تأثير حركة عائمة (Floating Animation)
+            scene.tweens.add({
+                targets: this,
+                y: y - 10,
+                duration: 800,
+                yoyo: true,
+                repeat: -1,
+                ease: 'Sine.easeInOut'
+            });
+        }
+    }// ==========================================
+    // المشهد الأساسي للمستويات (BaseLevelScene)
+    // ==========================================
+    class BaseLevelScene extends Phaser.Scene {
+        constructor(key, levelNumber, bgIndex) {
+            super({ key: key });
+            this.levelNumber = levelNumber;
+            this.bgIndex = bgIndex; // رقم الخلفية من الصورة المجمعة (1-8)
+        }
+
+        create() {
+            const width = this.scale.width;
+            const height = this.scale.height;
+
+            // 1. إعداد الخلفية (تقطيع من الصورة المجمعة 710bc8.jpg)
+            // بما أن الصورة تحتوي على 8 خلفيات (2 أعمدة و4 صفوف)
+            this.setupBackground();
+
+            // 2. إنشاء المجموعات (Groups) لسهولة الإدارة
+            this.platforms = this.physics.add.staticGroup();
+            this.enemies = this.physics.add.group({ runChildUpdate: true });
+            this.coins = this.physics.add.staticGroup();
+            this.questionBoxes = this.physics.add.staticGroup();
+            this.enemyBullets = this.physics.add.group();
+
+            // 3. إنشاء اللاعب
+            this.player = new Player(this, 100, height - 150);
+            
+            // 4. إعداد واجهة المستخدم والتحكم
+            this.ui = new GameUI(this);
+            this.cursors = this.input.keyboard.createCursorKeys();
+
+            // 5. إعداد الكاميرا الحديثة
+            this.cameras.main.setBounds(0, 0, 5000, height); // مستوى طويل جداً
+            this.physics.world.setBounds(0, 0, 5000, height);
+            this.cameras.main.startFollow(this.player, true, 0.1, 0.1);
+            this.cameras.main.setLerp(0.1, 0.1); // حركة كاميرا ناعمة
+
+            // 6. نظام التصادم (Collisions)
+            this.physics.add.collider(this.player, this.platforms);
+            this.physics.add.collider(this.enemies, this.platforms);
+            
+            // التفاعل مع العملات
+            this.physics.add.overlap(this.player, this.coins, (p, coin) => {
+                coin.destroy();
+                this.player.coins += 1;
+                this.sound.play('jump', { volume: 0.2, detune: 500 }); // صوت جمع
+            });
+
+            // التفاعل مع الصناديق
+            this.physics.add.collider(this.player, this.questionBoxes, (p, box) => {
+                if (p.body.touching.up && box.body.touching.down) {
+                    box.open();
+                }
+            });
+
+            // التصادم مع الأعداء
+            this.physics.add.overlap(this.player, this.enemies, (p, enemy) => {
+                if (p.body.touching.down && enemy.body.touching.up) {
+                    // قتل العدو عند القفز عليه
+                    enemy.destroy();
+                    p.setVelocityY(-400); // قفزة ارتدادية
+                } else {
+                    p.takeDamage();
+                }
+            });
+
+            // إنشاء تضاريس أولية (أرضية) - سنخصصها في كل مستوى
+            this.createFloor(5000);
+        }
+
+        setupBackground() {
+            // حساب إحداثيات الخلفية بناءً على الرقم bgIndex
+            // الصورة 710bc8.jpg مقسمة 2 عرضاً و 4 طولاً
+            let col = (this.bgIndex - 1) % 2;
+            let row = Math.floor((this.bgIndex - 1) / 2);
+            
+            // إضافة الخلفية كـ TileSprite لدعم التكرار (Parallax)
+            let bg = this.add.tileSprite(0, 0, 5000, 720, 'backgrounds_sheet')
+                .setOrigin(0, 0)
+                .setScrollFactor(0.5); // تأثير العمق (Parallax)
+            
+            // تحديد الجزء المقطوع من الصورة (هذا الجزء تقريبي ويحتاج لضبط حسب أبعاد الصورة الأصلية)
+            bg.setTilePosition(col * 640, row * 360); 
+        }
+
+        createFloor(length) {
+            for (let i = 0; i < length; i += 128) {
+                let ground = this.platforms.create(i, 700, 'characters_sheet').setScale(2).refreshBody();
+                ground.setTint(0x333333); // جعل الأرضية داكنة لتبدو كمنصة
+                ground.setVisible(false); // سنستبدلها لاحقاً برسومات أفضل
+                
+                // إضافة خط أرضي مرئي
+                this.add.rectangle(i, 710, 128, 20, 0x222222).setOrigin(0, 0);
+            }
+        }
+
+        respawnPlayer() {
+            // إعادة اللاعب إلى بداية المستوى أو أقرب نقطة (Checkpoint)
+            this.player.setPosition(100, 400);
+            this.player.health = 3;
+            this.cameras.main.flash(500, 255, 0, 0);
+        }
+
+        update(time, delta) {
+            this.player.update(time, this.cursors, this.ui.mobileInput);
+            this.ui.updateHUD(this.player.health, this.player.coins, this.player.hasShield);
+
+            // تحديث الأعداء
+            this.enemies.getChildren().forEach(enemy => enemy.update(time));
+        }
+    }// ==========================================
+    // المستويات 1 - 4: من الطفولة إلى الصراع على السلطة
+    // ==========================================
+
+    // المستوى 1: الطفولة (القرية والبدايات)
+    class Level1 extends BaseLevelScene {
+        constructor() { super('Level1', 1, 1); }
+        create() {
+            super.create();
+            this.add.text(400, 300, 'المستوى 1: الطفولة (1878 - 1899)', { fontSize: '32px', fill: '#fff' }).setOrigin(0.5).setScrollFactor(0.2);
+            
+            // إضافة منصات بسيطة للتدريب
+            this.platforms.create(600, 550, 'characters_sheet').setTint(0x555555).setScale(2).refreshBody();
+            this.platforms.create(900, 450, 'characters_sheet').setTint(0x555555).setScale(2).refreshBody();
+            
+            // أعداء بطيئين (بداية التعليم)
+            this.enemies.add(new Enemy(this, 800, 600, 1));
+            this.coins.add(new Coin(this, 900, 400));
+            
+            // بوابة النهاية للمستوى
+            this.endPoint = this.add.rectangle(4800, 600, 50, 200, 0x00ff00, 0.5);
+            this.physics.add.existing(this.endPoint, true);
+            this.physics.add.overlap(this.player, this.endPoint, () => this.scene.start('Level2'));
+        }
+    }
+
+    // المستوى 2: الثورة (بداية النشاط السري)
+    class Level2 extends BaseLevelScene {
+        constructor() { super('Level2', 2, 2); }
+        create() {
+            super.create();
+            this.add.text(400, 300, 'المستوى 2: الثورة (1900 - 1917)', { fontSize: '32px', fill: '#fff' }).setOrigin(0.5).setScrollFactor(0.2);
+            
+            // منصات أكثر تعقيداً
+            for(let i=0; i<5; i++) {
+                this.platforms.create(1000 + (i*400), 500 - (i*50), 'characters_sheet').setTint(0x773333).setScale(2).refreshBody();
+                this.enemies.add(new Enemy(this, 1200 + (i*400), 400, 2));
+            }
+
+            this.endPoint = this.add.rectangle(4800, 600, 50, 200, 0x00ff00, 0.5);
+            this.physics.add.existing(this.endPoint, true);
+            this.physics.add.overlap(this.player, this.endPoint, () => this.scene.start('Level3'));
+        }
+    }
+
+    // المستوى 3: الحياة السياسية (الترقي في الحزب)
+    class Level3 extends BaseLevelScene {
+        constructor() { super('Level3', 3, 3); }
+        create() {
+            super.create();
+            this.add.text(400, 300, 'المستوى 3: الحياة السياسية (1917 - 1922)', { fontSize: '32px', fill: '#fff' }).setOrigin(0.5).setScrollFactor(0.2);
+            
+            // إضافة صناديق أسئلة بكثرة هنا
+            this.questionBoxes.add(new QuestionBox(this, 1500, 500));
+            this.questionBoxes.add(new QuestionBox(this, 2500, 400));
+
+            this.endPoint = this.add.rectangle(4800, 600, 50, 200, 0x00ff00, 0.5);
+            this.physics.add.existing(this.endPoint, true);
+            this.physics.add.overlap(this.player, this.endPoint, () => this.scene.start('Level4'));
+        }
+    }
+
+    // المستوى 4: الصراع على السلطة
+    class Level4 extends BaseLevelScene {
+        constructor() { super('Level4', 4, 4); }
+        create() {
+            super.create();
+            this.add.text(400, 300, 'المستوى 4: الصراع على السلطة (1923 - 1928)', { fontSize: '32px', fill: '#fff' }).setOrigin(0.5).setScrollFactor(0.2);
+            
+            // أعداء أسرع وأكثر عدوانية
+            for(let i=0; i<10; i++) {
+                let e = new Enemy(this, 1000 + (i*350), 600, 4);
+                this.enemies.add(e);
+            }
+
+            this.endPoint = this.add.rectangle(4800, 600, 50, 200, 0x00ff00, 0.5);
+            this.physics.add.existing(this.endPoint, true);
+            this.physics.add.overlap(this.player, this.endPoint, () => this.scene.start('Level5'));
+        }
+    }// ==========================================
+    // المستويات 5 - 8: من السيطرة إلى المرحلة الختامية
+    // ==========================================
+
+    // المستوى 5: عصر السيطرة (1929 - 1934)
+    class Level5 extends BaseLevelScene {
+        constructor() { super('Level5', 5, 5); }
+        create() {
+            super.create();
+            this.add.text(400, 300, 'المستوى 5: عصر السيطرة (توفير الدروع)', { fontSize: '32px', fill: '#fff' }).setOrigin(0.5).setScrollFactor(0.2);
+            
+            // في هذا المستوى، الدرع يصبح حيوياً
+            this.questionBoxes.add(new QuestionBox(this, 1200, 450));
+            this.questionBoxes.add(new QuestionBox(this, 2200, 400));
+
+            this.endPoint = this.add.rectangle(4800, 600, 50, 200, 0x00ff00, 0.5);
+            this.physics.add.existing(this.endPoint, true);
+            this.physics.add.overlap(this.player, this.endPoint, () => this.scene.start('Level6'));
+        }
+    }
+
+    // المستوى 6: العصر الصناعي (عقبات النيران والمنصات المتحركة)
+    class Level6 extends BaseLevelScene {
+        constructor() { super('Level6', 6, 6); }
+        create() {
+            super.create();
+            this.add.text(400, 300, 'المستوى 6: العصر الصناعي (احذر النيران)', { fontSize: '32px', fill: '#fff' }).setOrigin(0.5).setScrollFactor(0.2);
+            
+            // إضافة عوائق نيران (Fire Hazards)
+            for(let i=0; i<8; i++) {
+                let fire = this.add.rectangle(1500 + (i*500), 680, 80, 40, 0xff4400).setOrigin(0.5);
+                this.physics.add.existing(fire, true);
+                this.physics.add.overlap(this.player, fire, () => this.player.takeDamage());
+                
+                // تأثير نبض للنيران
+                this.tweens.add({ targets: fire, scaleY: 2, duration: 500, yoyo: true, repeat: -1 });
+            }
+
+            this.endPoint = this.add.rectangle(4800, 600, 50, 200, 0x00ff00, 0.5);
+            this.physics.add.existing(this.endPoint, true);
+            this.physics.add.overlap(this.player, this.endPoint, () => this.scene.start('Level7'));
+        }
+    }
+
+    // المستوى 7: الحرب (أعداء يطلقون الرصاص)
+    class Level7 extends BaseLevelScene {
+        constructor() { super('Level7', 7, 7); }
+        create() {
+            super.create();
+            this.add.text(400, 300, 'المستوى 7: الحرب العظمى (تجنب الرصاص)', { fontSize: '32px', fill: '#fff' }).setOrigin(0.5).setScrollFactor(0.2);
+            
+            // إضافة أعداء مقاتلين (Shooting Enemies)
+            for(let i=0; i<6; i++) {
+                let enemy = new Enemy(this, 1200 + (i*600), 600, 7);
+                this.enemies.add(enemy);
+            }
+
+            // تصادم الرصاص مع اللاعب
+            this.physics.add.overlap(this.player, this.enemyBullets, (p, bullet) => {
+                bullet.destroy();
+                p.takeDamage();
+            });
+
+            this.endPoint = this.add.rectangle(4800, 600, 50, 200, 0x00ff00, 0.5);
+            this.physics.add.existing(this.endPoint, true);
+            this.physics.add.overlap(this.player, this.endPoint, () => this.scene.start('Level8'));
+        }
+    }
+
+    // المستوى 8: المرحلة النهائية والزعيم (1945 - 1953)
+    class Level8 extends BaseLevelScene {
+        constructor() { super('Level8', 8, 8); }
+        create() {
+            super.create();
+            this.add.text(400, 300, 'المستوى 8: المواجهة النهائية', { fontSize: '32px', fill: '#fff' }).setOrigin(0.5).setScrollFactor(0.2);
+            
+            // إنشاء الزعيم النهائي (Boss)
+            this.boss = this.physics.add.sprite(4500, 500, 'characters_sheet').setScale(4).setTint(0xff0000);
+            this.boss.health = 10;
+            this.boss.body.allowGravity = false;
+            this.boss.setImmovable(true);
+
+            // نمط هجوم الزعيم
+            this.time.addEvent({
+                delay: 2000,
+                callback: () => {
+                    if (this.boss.active) {
+                        let b = this.physics.add.sprite(this.boss.x, this.boss.y, 'characters_sheet').setTint(0xff0000);
+                        this.physics.moveToObject(b, this.player, 300);
+                        this.enemyBullets.add(b);
+                    }
+                },
+                loop: true
+            });
+
+            // هزيمة الزعيم عند القفز عليه 10 مرات
+            this.physics.add.overlap(this.player, this.boss, (p, b) => {
+                if (p.body.touching.down && b.body.touching.up) {
+                    b.health--;
+                    p.setVelocityY(-500);
+                    this.cameras.main.shake(200, 0.03);
+                    if (b.health <= 0) {
+                        b.destroy();
+                        this.add.text(width/2, height/2, 'لقد انتصرت! النهاية', { fontSize: '64px', fill: '#ffd700' }).setOrigin(0.5).setScrollFactor(0);
+                    }
+                } else {
+                    p.takeDamage();
+                }
+            });
+        }
+    }// ==========================================
+    // إعدادات التشغيل النهائية وربط المشاهد
+    // ==========================================
+    
+    const config = {
+        type: Phaser.AUTO,
+        parent: 'game-container',
+        scale: {
+            mode: Phaser.Scale.FIT,
+            autoCenter: Phaser.Scale.CENTER_BOTH,
+            width: 1280,
+            height: 720
+        },
+        physics: {
+            default: 'arcade',
+            arcade: {
+                gravity: { y: 1200 }, // جاذبية قوية للحصول على شعور "Modern Platformer"
+                debug: false // غيرها لـ true إذا أردت رؤية حدود التصادم أثناء التطوير
+            }
+        },
+        // ترتيب المشاهد: يبدأ بالمحمل ثم القائمة ثم المستويات بالتسلسل
+        scene: [
+            BootScene, 
+            MenuScene, 
+            Level1, 
+            Level2, 
+            Level3, 
+            Level4, 
+            Level5, 
+            Level6, 
+            Level7, 
+            Level8
+        ]
+    };
+
+    // بدء تشغيل اللعبة فعلياً
+    const game = new Phaser.Game(config);
+
+    // إضافة وظيفة لتغيير حجم اللعبة عند تغيير أبعاد النافذة (Responsive)
+    window.addEventListener('resize', () => {
+        game.scale.refresh();
+    });
+
+</script>
+
+<div id="game-container"></div>
+
+</body>
+</html>
